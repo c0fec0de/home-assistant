@@ -1,5 +1,6 @@
 """Support for Ebusd daemon for communication with eBUS heating systems."""
-from datetime import timedelta
+import asyncio
+import collections
 import logging
 import socket
 
@@ -14,9 +15,8 @@ from homeassistant.const import (
 )
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.discovery import load_platform
-from homeassistant.util import Throttle
 
-from .const import DOMAIN, CONF_CIRCUIT, CONF_CIRCUITMAP, DEFAULT_PORT, DEFAULT_NAME
+from .const import CONF_CIRCUIT, CONF_CIRCUITMAP, DEFAULT_NAME, DEFAULT_PORT, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,10 +38,11 @@ CONFIG_SCHEMA = vol.Schema(
                 {
                     vol.Required(CONF_HOST): cv.string,
                     vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
-                    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+                    vol.Optional(CONF_CIRCUITMAP, default={}): vol.All(),
+                    # legacy
                     vol.Optional(CONF_CIRCUIT): cv.string,
+                    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
                     vol.Optional(CONF_MONITORED_CONDITIONS, default=[]): cv.ensure_list,
-                    # vol.Optional(CONF_CIRCUITMAP, default={}): cv.ensure_list,
                 }
             )
         )
@@ -50,51 +51,89 @@ CONFIG_SCHEMA = vol.Schema(
 )
 
 
+async def async_setup_entry(hass, entry):
+    """Set up a config entry for Unipi."""
+    return True
+
+
 async def async_setup(hass, config):
     """Set up the eBusd component."""
     conf = config[DOMAIN]
     host = conf[CONF_HOST]
-    name = conf[CONF_NAME]
-    circuit = conf[CONF_CIRCUIT]
-    monitored_conditions = conf.get(CONF_MONITORED_CONDITIONS)
-    circuitmap = {}
-    hass.data[DOMAIN] = data = Data(host, port, name, circuit, monitored_conditions, circuitmap)
-
+    port = conf[CONF_PORT]
+    circuitmap = conf[CONF_CIRCUITMAP]
+    # legacy
+    circuit = conf.get(CONF_CIRCUIT, None)
+    if circuit:
+        circuitmap[circuit] = conf[CONF_NAME]
+    # monitored_conditions = conf.get(CONF_MONITORED_CONDITIONS)
+    hass.data[DOMAIN] = data = Data(host, port, circuitmap)
     try:
-        _LOGGER.debug("setup started")
-        await data.async_connect()
+        _LOGGER.debug("setup() started")
+        await data.async_setup()
 
-#         sensor_config = {
-#             CONF_MONITORED_CONDITIONS: monitored_conditions,
-#             "client_name": name,
-#             "sensor_types": SENSOR_TYPES[circuit],
-#         }
-#         load_platform(hass, "sensor", DOMAIN, sensor_config, config)
+        load_platform(hass, "sensor", DOMAIN, None, config)
 
         # TODO
         # hass.services.register(DOMAIN, SERVICE_EBUSD_WRITE, data.write)
 
-        _LOGGER.debug("setup completed")
+        _LOGGER.debug("setup() completed")
         return True
-    except (socket.timeout, socket.error):
+    except (socket.timeout, socket.error) as err:
+        _LOGGER.error(err)
         return False
 
 
 class Data:
-
     """Data Handler."""
 
-    def __init__(self, host, port, name, circuit, monitored_conditions, circuitmap):
-        self.host = host
-        self.port = port
-        self.name = name
-        self.circuit = circuit
-        self.monitored_conditions = monitored_conditions
-        self.circuitmap = circuitmap
+    def __init__(self, host, port, circuitmap):
+        """Container."""
+        self.circuitmap = ebus.CircuitMap(circuitmap)
         self.connection = ebus.Connection(host, port)
+        self.monitor = ebus.Connection(host, port)
+        self.fields = ebus.Fields()
+        self.units = ebus.UNITS
+        self.monitors = []
+        self.values = {}
+        self.observers = collections.defaultdict(list)
 
-    async def async_connect(self):
+    async def async_setup(self):
+        """Connect and start monitoring."""
         await self.connection.connect()
+        asyncio.ensure_future(self.async_monitor())
+
+        self.fields.load()
+
+        for circuit in self.circuitmap.iter_circuits():
+            for field in self.fields.get(circuit):
+                circuitfield = circuit, field
+                self.monitors.append(circuitfield)
+                self.values[circuitfield] = None
+
+    async def async_monitor(self):
+        """Monitor."""
+        monitor = self.monitor
+        decoder = ebus.Decoder(self.fields, self.units)
+        await monitor.connect()
+        await monitor.start_listening(verbose=True)
+        while True:
+            line = await monitor.receive()
+            for item in decoder.decode(line):
+                await self._update(item.circuit, item.field, item.value)
+
+    def add_observer(self, circuit, field, method):
+        """
+        Add observer.
+
+        `method` is called, whenever self.values[circuit] changes.
+        """
+        self.observers[(circuit, field)].append(method)
+
+    async def _update(self, circuit, field, value):
+        self.values[(circuit, field)] = value
+        for method in self.observers[(circuit, field)]:
+            await method()
 
     #     @Throttle(MIN_TIME_BETWEEN_UPDATES)
     #     def update(self, name, stype):
@@ -122,5 +161,7 @@ class Data:
         try:
             await self.connection.write(name, circuit, value)
         except RuntimeError as err:
-            _LOGGER.error(f"ebusd_write(name={name}, circuit={circuit}, value={value}) FAILED")
+            _LOGGER.error(
+                f"ebusd_write(name={name}, circuit={circuit}, value={value}) FAILED"
+            )
             _LOGGER.error(err)

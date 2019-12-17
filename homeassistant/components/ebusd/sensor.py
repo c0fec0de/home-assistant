@@ -1,11 +1,13 @@
-# """Support for Ebusd sensors."""
+"""EBUS daemon sensors."""
 # import datetime
-# import logging
+import logging
 
-# from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.entity import Entity
+
+from .const import DOMAIN
+
 # import homeassistant.util.dt as dt_util
 
-# from .const import DOMAIN
 
 # TIME_FRAME1_BEGIN = "time_frame1_begin"
 # TIME_FRAME1_END = "time_frame1_end"
@@ -14,45 +16,70 @@
 # TIME_FRAME3_BEGIN = "time_frame3_begin"
 # TIME_FRAME3_END = "time_frame3_end"
 
-# _LOGGER = logging.getLogger(__name__)
+_LOGGER = logging.getLogger(__name__)
 
 
-# def setup_platform(hass, config, add_entities, discovery_info=None):
-#     """Set up the Ebus sensor."""
-#     ebusd_api = hass.data[DOMAIN]
-#     monitored_conditions = discovery_info["monitored_conditions"]
-#     name = discovery_info["client_name"]
+def setup_platform(hass, config, add_entities, discovery_info=None):
+    """Set up the Ebus sensor."""
+    data = hass.data[DOMAIN]
+    _LOGGER.debug("setup_platform() started")
 
-#     dev = []
-#     for condition in monitored_conditions:
-#         dev.append(
-#             EbusdSensor(ebusd_api, discovery_info["sensor_types"][condition], name)
-#         )
-
-#     add_entities(dev, True)
+    entities = []
+    for circuit, field in data.monitors:
+        entities.append(GenericSensor(data, circuit, field))
+    add_entities(sorted(entities, key=lambda sensor: sensor.name), True)
+    _LOGGER.debug("setup_platform() done")
 
 
-class Sensor(Entity):
+class GenericSensor(Entity):
     """Generic Sensor."""
 
-#     def __init__(self, data, sensor, name):
-#         """Initialize the sensor."""
-#         self._state = None
-#         self._client_name = name
-#         self._name, self._unit_of_measurement, self._icon, self._type = sensor
-#         self.data = data
+    def __init__(self, data, circuit, field):
+        """Initialize."""
+        self._data = data
+        self._circuit = circuit
+        self._field = field
+        humanname = data.circuitmap.get_humanname(circuit)
+        self._name = f"{humanname}: {field.title}" if humanname else field.title
+        self._unit = data.units.get(field.unitname)
+        self._state = None
 
-#     @property
-#     def name(self):
-#         """Return the name of the sensor."""
-#         return f"{self._client_name} {self._name}"
+        async def async_update():
+            self.update()
+            await self.async_update_ha_state()
 
-#     @property
-#     def state(self):
-#         """Return the state of the sensor."""
-#         return self._state
+        data.add_observer(circuit, field, async_update)
 
-#     @property
+    @property
+    def name(self):
+        """Name of the sensor."""
+        return self._name
+
+    @property
+    def should_poll(self):
+        """Poll is not needed."""
+        return False
+
+    @property
+    def state(self):
+        """State of the sensor."""
+        return self._state
+
+    @property
+    def icon(self):
+        """Icon to use in the frontend, if any."""
+        return self._field.icon or (self._unit and self._unit.icon)
+
+    @property
+    def unit_of_measurement(self):
+        """Return Unit."""
+        return self._unit and self._unit.uom
+
+    def update(self):
+        """Update internal state."""
+        self._state = self._data.values[(self._circuit, self._field)]
+
+
 #     def device_state_attributes(self):
 #         """Return the device state attributes."""
 #         if self._type == 1 and self._state is not None:
@@ -74,24 +101,3 @@ class Sensor(Entity):
 #                     schedule[item[0]] = parsed.isoformat()
 #             return schedule
 #         return None
-
-#     @property
-#     def icon(self):
-#         """Icon to use in the frontend, if any."""
-#         return self._icon
-
-#     @property
-#     def unit_of_measurement(self):
-#         """Return the unit of measurement."""
-#         return self._unit_of_measurement
-
-#     def update(self):
-#         """Fetch new state data for the sensor."""
-#         try:
-#             self.data.update(self._name, self._type)
-#             if self._name not in self.data.value:
-#                 return
-
-#             self._state = self.data.value[self._name]
-#         except RuntimeError:
-#             _LOGGER.debug("EbusdData.update exception")
