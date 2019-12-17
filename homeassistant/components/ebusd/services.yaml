@@ -3,4 +3,4 @@ write:
   fields:
     call:
       description: Property name and value to set
-      example: '{"name": "Hc1MaxFlowTempDesired", "value": 21}'
+      example: '{"device": "bai", "name": "Hc1MaxFlowTempDesired", "value": 21}'
