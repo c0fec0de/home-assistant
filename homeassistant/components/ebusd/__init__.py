@@ -1,6 +1,7 @@
 """Support for Ebusd daemon for communication with eBUS heating systems."""
 import asyncio
 import collections
+import datetime
 import logging
 import socket
 
@@ -96,6 +97,8 @@ class Data:
         self.units = ebus.UNITS
         self.monitors = []
         self.values = {}
+        self.available = {}
+        self.lastseen = {}
         self.observers = collections.defaultdict(list)
 
     async def async_setup(self):
@@ -110,6 +113,8 @@ class Data:
                 circuitfield = circuit, field
                 self.monitors.append(circuitfield)
                 self.values[circuitfield] = None
+                self.available[circuitfield] = None
+                self.lastseen[circuitfield] = None
 
     async def async_monitor(self):
         """Monitor."""
@@ -132,6 +137,8 @@ class Data:
 
     async def _update(self, circuit, field, value):
         self.values[(circuit, field)] = value
+        self.available[(circuit, field)] = True
+        self.lastseen[(circuit, field)] = datetime.datetime.now()
         for method in self.observers[(circuit, field)]:
             await method()
 

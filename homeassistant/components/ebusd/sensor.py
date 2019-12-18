@@ -43,6 +43,7 @@ class GenericSensor(Entity):
         self._name = f"{humanname}: {field.title}" if humanname else field.title
         self._unit = data.units.get(field.unitname)
         self._state = None
+        self._available = True
 
         async def async_update():
             self.update()
@@ -66,6 +67,11 @@ class GenericSensor(Entity):
         return self._state
 
     @property
+    def available(self):
+        """Availablity of the sensor."""
+        return self._available or self._available is None
+
+    @property
     def icon(self):
         """Icon to use in the frontend, if any."""
         return self._field.icon or (self._unit and self._unit.icon)
@@ -78,6 +84,7 @@ class GenericSensor(Entity):
     def update(self):
         """Update internal state."""
         self._state = self._data.values[(self._circuit, self._field)]
+        self._available = self._data.available[(self._circuit, self._field)]
 
 
 #     def device_state_attributes(self):
