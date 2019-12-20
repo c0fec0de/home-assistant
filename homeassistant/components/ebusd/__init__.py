@@ -1,9 +1,9 @@
 """Support for Ebusd daemon for communication with eBUS heating systems."""
 import asyncio
 import collections
-import datetime
 import logging
 import socket
+import time
 
 import ebus
 import voluptuous as vol
@@ -13,11 +13,23 @@ from homeassistant.const import (
     CONF_MONITORED_CONDITIONS,
     CONF_NAME,
     CONF_PORT,
+    CONF_TIMEOUT,
 )
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.discovery import load_platform
 
-from .const import CONF_CIRCUIT, CONF_CIRCUITMAP, DEFAULT_NAME, DEFAULT_PORT, DOMAIN
+from .const import (
+    CONF_CIRCUIT,
+    CONF_CIRCUITMAP,
+    CONF_POLL_INTERVAL,
+    DEFAULT_NAME,
+    DEFAULT_POLL_INTERVAL,
+    DEFAULT_PORT,
+    DEFAULT_TIMEOUT,
+    DOMAIN,
+)
+
+WAIT_MAX = 60
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -40,6 +52,12 @@ CONFIG_SCHEMA = vol.Schema(
                     vol.Required(CONF_HOST): cv.string,
                     vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
                     vol.Optional(CONF_CIRCUITMAP, default={}): vol.All(),
+                    vol.Required(
+                        CONF_POLL_INTERVAL, default=DEFAULT_POLL_INTERVAL
+                    ): cv.positive_int,
+                    vol.Required(
+                        CONF_TIMEOUT, default=DEFAULT_TIMEOUT
+                    ): cv.positive_int,
                     # legacy
                     vol.Optional(CONF_CIRCUIT): cv.string,
                     vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
@@ -63,12 +81,14 @@ async def async_setup(hass, config):
     host = conf[CONF_HOST]
     port = conf[CONF_PORT]
     circuitmap = conf[CONF_CIRCUITMAP]
+    poll_interval = conf[CONF_POLL_INTERVAL]
+    timeout = conf[CONF_TIMEOUT]
     # legacy
     circuit = conf.get(CONF_CIRCUIT, None)
     if circuit:
         circuitmap[circuit] = conf[CONF_NAME]
     # monitored_conditions = conf.get(CONF_MONITORED_CONDITIONS)
-    hass.data[DOMAIN] = data = Data(host, port, circuitmap)
+    hass.data[DOMAIN] = data = Data(host, port, circuitmap, poll_interval, timeout)
     try:
         _LOGGER.debug("setup() started")
         await data.async_setup()
@@ -88,58 +108,181 @@ async def async_setup(hass, config):
 class Data:
     """Data Handler."""
 
-    def __init__(self, host, port, circuitmap):
+    def __init__(self, host, port, circuitmap, poll_interval, timeout):
         """Container."""
         self.circuitmap = ebus.CircuitMap(circuitmap)
-        self.connection = ebus.Connection(host, port)
+        self.query = ebus.Connection(host, port)
+        self.writer = ebus.Connection(host, port, autoconnect=True)
         self.monitor = ebus.Connection(host, port)
+        self.poll_interval = poll_interval
+        self.timeout = timeout
         self.fields = ebus.Fields()
         self.units = ebus.UNITS
+        self.decoder = ebus.Decoder(self.fields, self.units)
         self.monitors = []
-        self.values = {}
+        self.states = {}
+        self.attrs = {}
         self.available = {}
         self.lastseen = {}
         self.observers = collections.defaultdict(list)
 
     async def async_setup(self):
         """Connect and start monitoring."""
-        await self.connection.connect()
+        if self.poll_interval:
+            asyncio.ensure_future(self.async_query())
         asyncio.ensure_future(self.async_monitor())
 
         self.fields.load()
+        self.reset_states()
 
+    def reset_states(self):
+        """Reset all states."""
         for circuit in self.circuitmap.iter_circuits():
             for field in self.fields.get(circuit):
                 circuitfield = circuit, field
                 self.monitors.append(circuitfield)
-                self.values[circuitfield] = None
+                self.states[circuitfield] = None
+                self.attrs[circuitfield] = {}
                 self.available[circuitfield] = None
                 self.lastseen[circuitfield] = None
 
     async def async_monitor(self):
         """Monitor."""
         monitor = self.monitor
-        decoder = ebus.Decoder(self.fields, self.units)
-        await monitor.connect()
-        await monitor.start_listening(verbose=True)
+        wait = 1
         while True:
-            line = await monitor.receive()
-            for item in decoder.decode(line):
-                await self._update(item.circuit, item.field, item.value)
+            try:
+                await monitor.connect()
+                await monitor.start_listening(verbose=True)
+                _LOGGER.info("Monitor: started.")
+                wait = 1
+                while True:
+                    line = await monitor.receive()
+                    _LOGGER.debug(f"Monitor: {line!r}")
+                    try:
+                        for value in self.decoder.decode(line):
+                            await self._update(value)
+                            _LOGGER.info(
+                                f"Monitor: {value.circuit}: {value.field.title}={value.value}"
+                            )
+                    except (ValueError, ebus.decoder.FormatError) as err:
+                        _LOGGER.error(f"Monitor: Decode failed: {err}")
+                    except ebus.decoder.UnknownError as err:
+                        _LOGGER.warn(f"Monitor: Decode failed: {err}")
+            except OSError as err:
+                if wait == WAIT_MAX:
+                    self.reset_states()
+                    for methods in self.observers.values():
+                        for method in methods:
+                            await method()
+                    _LOGGER.error(
+                        f"Monitor: {err}, will retry every {wait} seconds, states reset"
+                    )
+                    wait += 1
+                else:
+                    _LOGGER.error(f"Monitor: {err}, retry in {wait} seconds")
+                    wait = min(2 * wait, WAIT_MAX)
+                await asyncio.sleep(wait)
+            finally:
+                await monitor.disconnect()
+
+    async def async_query(self):
+        """Query."""
+        query = self.query
+        wait = 1
+        while True:
+            try:
+                await query.connect()
+                _LOGGER.info("Query:   started.")
+                await asyncio.sleep(self.poll_interval)
+                wait = 1
+                while True:
+                    for circuitfield in tuple(self.states):
+                        circuit, field = circuitfield
+                        if (self.lastseen[circuitfield] or 0) > (
+                            time.time() - self.timeout
+                        ):  # not outdated
+                            continue
+                        if (
+                            self.available[circuitfield] is False
+                        ):  # skip non-available ones
+                            continue
+                        if (
+                            self.available[circuitfield] and field.status
+                        ):  # skip auto-update
+                            continue
+                        try:
+                            line = await self.query.read(
+                                field.name,
+                                circuit=circuit,
+                                ttl=self.timeout,
+                                verbose=True,
+                            )
+                            _LOGGER.debug(f"Query:   {line!r}")
+                            try:
+                                for value in self.decoder.decode(line):
+                                    await self._update(value)
+                                    _LOGGER.info(
+                                        f"Query:   {value.circuit}: {value.field.title}={value.value}"
+                                    )
+                            except (ValueError, ebus.decoder.FormatError) as err:
+                                self.available[circuitfield] = False
+                                _LOGGER.error(f"Monitor: Decode failed: {err}")
+                            except ebus.decoder.UnknownError as err:
+                                self.available[circuitfield] = False
+                                _LOGGER.warn(f"Monitor: Decode failed: {err}")
+                        except ebus.connection.CommandError:
+                            self.available[circuitfield] = False
+                            _LOGGER.warn(
+                                f"{circuit} {field.name} ({field.title}) not available on this EBUS installation"
+                            )
+                        # slow-down
+                        await asyncio.sleep(self.poll_interval)
+                    idle = self.timeout
+                    for (circuit, field), available in self.available.items():
+                        if field.status:
+                            ago = int(time.time() - self.lastseen[(circuit, field)])
+                            _LOGGER.debug(
+                                f"Query:   {circuit} {field.name} ({field.title}): monitored and seen {ago}s ago"
+                            )
+                        elif available:
+                            ago = int(time.time() - self.lastseen[(circuit, field)])
+                            idle = min(idle, max(self.timeout - ago, 0))
+                            _LOGGER.debug(
+                                f"Query:   {circuit} {field.name} ({field.title}): seen {ago}s ago"
+                            )
+                        else:
+                            _LOGGER.debug(
+                                f"Query:   {circuit} {field.name} ({field.title}): Not available, SKIP"
+                            )
+                    _LOGGER.info(f"Query:   wait for {idle}s")
+                    await asyncio.sleep(idle)
+            except OSError as err:
+                if wait == WAIT_MAX:
+                    _LOGGER.error(f"Query:   {err}, will retry every {wait} seconds")
+                    wait += 1
+                else:
+                    _LOGGER.error(f"Query:   {err}, retry in {wait} seconds")
+                    wait = min(2 * wait, WAIT_MAX)
+                await asyncio.sleep(wait)
+            finally:
+                await query.disconnect()
 
     def add_observer(self, circuit, field, method):
         """
         Add observer.
 
-        `method` is called, whenever self.values[circuit] changes.
+        `method` is called, whenever self.states[circuit] changes.
         """
         self.observers[(circuit, field)].append(method)
 
-    async def _update(self, circuit, field, value):
-        self.values[(circuit, field)] = value
-        self.available[(circuit, field)] = True
-        self.lastseen[(circuit, field)] = datetime.datetime.now()
-        for method in self.observers[(circuit, field)]:
+    async def _update(self, value):
+        circuitfield = value.circuit, value.field
+        self.states[circuitfield] = value.value
+        self.attrs[circuitfield] = value.attrs
+        self.available[circuitfield] = True
+        self.lastseen[circuitfield] = time.time()
+        for method in self.observers[circuitfield]:
             await method()
 
     #     @Throttle(MIN_TIME_BETWEEN_UPDATES)
@@ -166,7 +309,7 @@ class Data:
         value = call.data.get("value")
 
         try:
-            await self.connection.write(name, circuit, value)
+            await self.writer.write(name, circuit, value)
         except RuntimeError as err:
             _LOGGER.error(
                 f"ebusd_write(name={name}, circuit={circuit}, value={value}) FAILED"

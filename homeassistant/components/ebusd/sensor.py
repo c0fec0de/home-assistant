@@ -43,6 +43,7 @@ class GenericSensor(Entity):
         self._name = f"{humanname}: {field.title}" if humanname else field.title
         self._unit = data.units.get(field.unitname)
         self._state = None
+        self._attrs = {}
         self._available = True
 
         async def async_update():
@@ -69,7 +70,7 @@ class GenericSensor(Entity):
     @property
     def available(self):
         """Availablity of the sensor."""
-        return self._available or self._available is None
+        return self._available is True
 
     @property
     def icon(self):
@@ -83,28 +84,11 @@ class GenericSensor(Entity):
 
     def update(self):
         """Update internal state."""
-        self._state = self._data.values[(self._circuit, self._field)]
+        self._state = self._data.states[(self._circuit, self._field)]
+        self._attrs = self._data.attrs[(self._circuit, self._field)]
         self._available = self._data.available[(self._circuit, self._field)]
 
-
-#     def device_state_attributes(self):
-#         """Return the device state attributes."""
-#         if self._type == 1 and self._state is not None:
-#             schedule = {
-#                 TIME_FRAME1_BEGIN: None,
-#                 TIME_FRAME1_END: None,
-#                 TIME_FRAME2_BEGIN: None,
-#                 TIME_FRAME2_END: None,
-#                 TIME_FRAME3_BEGIN: None,
-#                 TIME_FRAME3_END: None,
-#             }
-#             time_frame = self._state.split(";")
-#             for index, item in enumerate(sorted(schedule.items())):
-#                 if index < len(time_frame):
-#                     parsed = datetime.datetime.strptime(time_frame[index], "%H:%M")
-#                     parsed = parsed.replace(
-#                         dt_util.now().year, dt_util.now().month, dt_util.now().day
-#                     )
-#                     schedule[item[0]] = parsed.isoformat()
-#             return schedule
-#         return None
+    @property
+    def device_state_attributes(self):
+        """Return the device state attributes."""
+        return self._attrs
