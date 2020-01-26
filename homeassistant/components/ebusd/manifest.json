@@ -1,6 +1,6 @@
 {
   "domain": "ebusd",
-  "name": "ebusd",
+  "name": "Ebusd",
   "documentation": "https://www.home-assistant.io/integrations/ebusd",
   "requirements": [
     "ebus==0.0.1"
