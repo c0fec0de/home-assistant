@@ -1,0 +1,13 @@
+{
+  "domain": "unipi",
+  "name": "UniPi",
+  "config_flow": false,
+  "documentation": "https://www.home-assistant.io/components/unipi",
+  "requirements": ["websockets==6.0"],
+  "ssdp": {},
+  "homekit": {},
+  "dependencies": [],
+  "codeowners": [
+    "@c0fec0de"
+  ]
+}
