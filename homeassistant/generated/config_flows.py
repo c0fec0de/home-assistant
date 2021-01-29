@@ -142,6 +142,7 @@ FLOWS = [
     "nightscout",
     "notion",
     "nuheat",
+    "nuki",
     "nut",
     "nws",
     "nzbget",
