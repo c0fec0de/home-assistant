@@ -1,0 +1,8 @@
+{
+  "domain": "unipi",
+  "name": "UniPi",
+  "documentation": "https://www.home-assistant.io/integrations/unipi",
+  "requirements": [],
+  "codeowners": ["@c0fec0de"],
+  "config_flow": true
+}
