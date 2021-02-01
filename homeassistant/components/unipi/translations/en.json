@@ -1,0 +1,19 @@
+{
+    "config": {
+        "error": {
+            "connection_error": "Cannot connect.",
+            "invalid_host": "Invalid hostname or IP address"
+        },
+        "step": {
+            "user": {
+                "data": {
+                    "host": "Host",
+                    "name": "Unique name",
+                    "port": "Port"
+                },
+                "description": "Set up UniPi integration. If you have problems with configuration go to: https://www.home-assistant.io/integrations/unipi.",
+                "title": "UniPi - Connect"
+            }
+        }
+    }
+}
